@@ -160,6 +160,9 @@ pub struct Track {
     pub eq_mid_db: f64,
     #[serde(default, skip_serializing_if = "is_zero_f")]
     pub eq_high_db: f64,
+    /// VST3 insert chain (v5, audio tracks): processed in order, before the fader.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<TrackPlugin>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -284,6 +287,30 @@ pub struct OfxEffect {
     pub params: Map<String, Value>,
     #[serde(default = "yes")]
     pub enabled: bool,
+}
+
+/// One VST3 plugin instance in a track's insert chain (v5). The plugin is found
+/// again by `plugin_id` (the factory's stable class id) on any machine; `path`
+/// is where it was last seen. `state` is the plugin's own saved state (base64),
+/// so a mix survives a move between machines.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackPlugin {
+    pub id: Uuid,
+    pub plugin_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub path: String,
+    /// Normalised (0–1) parameter values by name; omitted parameters keep defaults.
+    #[serde(default)]
+    pub params: Map<String, Value>,
+    /// Plugin state blob, base64 (empty until first snapshot).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Fixed channel-strip position (0–4); a track holds at most one plugin per slot.
+    #[serde(default)]
+    pub slot: u8,
 }
 
 pub const SPEED_RANGE: (f64, f64) = (0.25, 4.0);
@@ -952,6 +979,32 @@ fn validate_mixer(t: &Track) -> CoreResult<()> {
             return Err(CoreError::Invalid(format!("track {} EQ {n} {v} dB is outside −18..+18", t.name)));
         }
     }
+    // VST3 insert chain (v5): audio tracks only, five fixed slots, sane fields.
+    if t.kind != TrackKind::Audio && !t.plugins.is_empty() {
+        return Err(CoreError::Invalid(format!("track {} has a plugin chain; plugins apply to audio tracks only", t.name)));
+    }
+    if t.plugins.len() > 5 {
+        return Err(CoreError::Invalid(format!("track {} has more than 5 plugins", t.name)));
+    }
+    let mut seen_ids = HashSet::new();
+    let mut seen_slots = HashSet::new();
+    for (i, fx) in t.plugins.iter().enumerate() {
+        if !seen_ids.insert(fx.id) {
+            return Err(CoreError::Invalid(format!("track {} has duplicate plugin instance ids", t.name)));
+        }
+        if fx.slot > 4 {
+            return Err(CoreError::Invalid(format!("track {} plugin #{i} ({:?}) has slot {} (0–4)", t.name, fx.label, fx.slot)));
+        }
+        if !seen_slots.insert(fx.slot) {
+            return Err(CoreError::Invalid(format!("track {} has two plugins in slot {}", t.name, fx.slot)));
+        }
+        if fx.plugin_id.trim().is_empty() || fx.plugin_id.len() > 64 || fx.label.len() > 200 {
+            return Err(CoreError::Invalid(format!("track {} plugin #{i} ({:?}) has an unusable id or label", t.name, fx.label)));
+        }
+        if fx.path.len() > 4096 || fx.params.len() > 512 || fx.state.len() > 1_048_576 {
+            return Err(CoreError::Invalid(format!("track {} plugin #{i} ({:?}) carries an unusable path, parameter set or state", t.name, fx.label)));
+        }
+    }
     Ok(())
 }
 
@@ -1043,6 +1096,7 @@ impl Track {
             eq_low_db: 0.0,
             eq_mid_db: 0.0,
             eq_high_db: 0.0,
+            plugins: vec![],
             extra: Map::new(),
         }
     }
@@ -1134,7 +1188,7 @@ mod tests {
         let (mut p, mid) = project();
         p.tracks[0].clips.push(Clip::new(mid, "intro", 0, 0, 50));
         let json = serde_json::to_string(&p).unwrap();
-        for key in ["fade_in_frames", "transition_in", "speed", "reversed", "lut", "titles", "markers", "mark_in", "pan", "solo", "eq_low_db", "volume_db"] {
+        for key in ["fade_in_frames", "transition_in", "speed", "reversed", "lut", "titles", "markers", "mark_in", "pan", "solo", "eq_low_db", "volume_db", "plugins"] {
             assert!(!json.contains(&format!("\"{key}\"")), "{key} leaked into a v1-shaped project");
         }
         // And a v1 document (no v2 keys) loads with neutral v2 values.
@@ -1234,4 +1288,37 @@ mod tests {
         p.mark_out = Some(80);
         p.validate().unwrap();
     }
+
+    #[test]
+    fn plugin_chain_rules() {
+        let mk = |slot: u8| TrackPlugin { id: Uuid::new_v4(), plugin_id: "a".repeat(32), label: "TestComp".into(), path: "/x/TestComp.vst3".into(), params: Map::new(), state: String::new(), enabled: true, slot };
+
+        // A single plugin in a valid slot on an audio track passes.
+        let (mut p, _) = project();
+        p.tracks[2].plugins.push(mk(0));
+        p.validate().unwrap();
+
+        // Video tracks refuse chains.
+        let (mut p, _) = project();
+        p.tracks[0].plugins.push(mk(0));
+        assert!(p.validate().is_err(), "video track with a plugin");
+
+        // Two plugins in the same slot.
+        let (mut p, _) = project();
+        p.tracks[2].plugins = vec![mk(2), mk(2)];
+        assert!(p.validate().is_err(), "duplicate slot");
+
+        // Out-of-range slot.
+        let (mut p, _) = project();
+        p.tracks[2].plugins = vec![mk(9)];
+        assert!(p.validate().is_err(), "slot out of range");
+
+        // Five slots is the cap.
+        let (mut p, _) = project();
+        p.tracks[2].plugins = (0..5).map(mk).collect();
+        p.validate().unwrap();
+        p.tracks[2].plugins.push(mk(0));
+        assert!(p.validate().is_err(), "more than five");
+    }
+
 }

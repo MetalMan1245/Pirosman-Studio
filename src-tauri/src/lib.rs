@@ -3,6 +3,7 @@ mod hub;
 mod media_server;
 mod preflight;
 mod state;
+mod vst3;
 
 use tauri::Manager;
 
@@ -160,6 +161,13 @@ pub fn run() {
             commands::diagnostics,
             commands::reveal_path,
             commands::ffmpeg_status,
+            vst3::vst3_scan,
+            vst3::vst3_load,
+            vst3::vst3_set_param,
+            vst3::vst3_save_state,
+            vst3::vst3_open_editor,
+            vst3::vst3_close_editor,
+            vst3::vst3_unload,
             hub::hub_projects,
             hub::hub_duplicate,
             hub::hub_rename,

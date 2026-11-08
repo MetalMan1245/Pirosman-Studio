@@ -74,6 +74,10 @@ pub struct AppState {
     pub ofx: Mutex<Option<Catalog>>,
     /// One OpenFX viewer frame at a time.
     pub ofx_preview: Mutex<u64>,
+    /// Live VST3 instances, keyed by the track slot id the UI created.
+    pub vst3: Mutex<HashMap<Uuid, Arc<Mutex<vst3_host::Plugin>>>>,
+    /// (slot, stop flag) of the plugin editor whose servicing thread is running.
+    pub vst3_editor: Mutex<Option<(Uuid, Arc<AtomicBool>)>>,
 }
 
 impl AppState {
@@ -88,6 +92,8 @@ impl AppState {
             hub: Mutex::new(None),
             ofx: Mutex::new(None),
             ofx_preview: Mutex::new(0),
+            vst3: Mutex::new(HashMap::new()),
+            vst3_editor: Mutex::new(None),
         }
     }
 

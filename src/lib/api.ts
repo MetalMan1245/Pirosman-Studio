@@ -72,10 +72,22 @@ export interface TitleClip {
   transform?: Transform | null; style?: TextStyle;
 }
 
+/** A VST3 plugin in a track's insert chain. Mirrors `TrackPlugin` in pirosman-core.
+ *  `slot` is the fixed channel-strip position (0–4); empty positions are absent. */
+export interface TrackPlugin {
+  id: Uuid; plugin_id: string; label: string; path?: string;
+  params: Record<string, number>; state?: string; enabled?: boolean; slot: number;
+}
+
 export interface Track {
   id: Uuid; kind: TrackKind; name: string; muted: boolean; locked: boolean; clips: Clip[];
   titles?: TitleClip[]; solo?: boolean; volume_db?: number; pan?: number; eq_low_db?: number; eq_mid_db?: number; eq_high_db?: number;
+  plugins?: TrackPlugin[];
 }
+
+export interface Vst3Entry { name: string; path: string }
+export interface Vst3ParamInfo { id: number; name: string; value: number; canAutomate: boolean }
+export interface Vst3Loaded { name: string; uid: string; params: Vst3ParamInfo[] }
 
 export type MarkerColor = "yellow" | "red" | "blue" | "green" | "purple";
 export interface Marker { id: Uuid; frame: number; name: string; color: MarkerColor; note?: string }
@@ -94,6 +106,7 @@ export interface ClipPatch {
 export interface TrackPatch {
   name?: string; muted?: boolean; locked?: boolean; solo?: boolean; volume_db?: number; pan?: number;
   eq_low_db?: number; eq_mid_db?: number; eq_high_db?: number;
+  plugins?: TrackPlugin[];
 }
 export interface TitlePatch {
   text?: string; font_size?: number; color_hex?: string; position?: TitlePosition; duration?: number;
@@ -254,6 +267,13 @@ export const api = {
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   ffmpegStatus: () => invoke<Diagnostics["tools"]>("ffmpeg_status"),
   revealFfmpegFolder: () => invoke<void>("reveal_ffmpeg_folder"),
+  vst3Scan: () => invoke<Vst3Entry[]>("vst3_scan"),
+  vst3Load: (slot: Uuid, path: string, saved?: string) => invoke<Vst3Loaded>("vst3_load", { slot, path, saved: saved ?? null }),
+  vst3SetParam: (slot: Uuid, id: number, value: number) => invoke<string>("vst3_set_param", { slot, id, value }),
+  vst3SaveState: (slot: Uuid) => invoke<string>("vst3_save_state", { slot }),
+  vst3OpenEditor: (slot: Uuid) => invoke<void>("vst3_open_editor", { slot }),
+  vst3CloseEditor: (slot: Uuid) => invoke<void>("vst3_close_editor", { slot }),
+  vst3Unload: (slot: Uuid) => invoke<void>("vst3_unload", { slot }),
 };
 
 export interface HubProject {

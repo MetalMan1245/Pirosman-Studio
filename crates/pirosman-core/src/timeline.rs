@@ -11,7 +11,7 @@ use serde_json::Map;
 use uuid::Uuid;
 
 use crate::error::{CoreError, CoreResult};
-use crate::model::{Clip, ColorParams, Crop, Keyframe, Marker, MediaKind, OfxEffect, Project, TextStyle, TitleClip, TitlePosition, Track, TrackKind, Transform, Transition, Vfx, MARKER_COLORS};
+use crate::model::{Clip, ColorParams, Crop, Keyframe, Marker, MediaKind, OfxEffect, Project, TextStyle, TitleClip, TitlePosition, Track, TrackKind, Transform, Transition, TrackPlugin, Vfx, MARKER_COLORS};
 
 fn transact<T>(p: &mut Project, f: impl FnOnce(&mut Project) -> CoreResult<T>) -> CoreResult<T> {
     let mut q = p.clone();
@@ -744,6 +744,7 @@ pub struct TrackPatch {
     pub eq_low_db: Option<f64>,
     pub eq_mid_db: Option<f64>,
     pub eq_high_db: Option<f64>,
+    pub plugins: Option<Vec<TrackPlugin>>,
 }
 
 pub fn update_track(p: &mut Project, track_id: Uuid, patch: TrackPatch) -> CoreResult<()> {
@@ -781,6 +782,9 @@ pub fn update_track(p: &mut Project, track_id: Uuid, patch: TrackPatch) -> CoreR
         }
         if let Some(v) = patch.eq_high_db {
             t.eq_high_db = r1(v);
+        }
+        if let Some(pl) = patch.plugins {
+            t.plugins = pl;
         }
         Ok(())
     })

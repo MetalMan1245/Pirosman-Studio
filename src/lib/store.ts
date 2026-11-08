@@ -55,6 +55,8 @@ interface UI {
   /** Installed OpenFX plugins (null until the first scan finishes). */
   ofx: OfxCatalog | null;
   ofxScanning: boolean;
+  /** The plugin slot (`TrackPlugin.id`) whose native editor window is open, if any. */
+  vst3Editor: string | null;
   dialog:
     | null
     | { kind: "new"; preset?: string }
@@ -111,6 +113,7 @@ export const useUI = create<UI>((set, get) => ({
   drag: null,
   ofx: null,
   ofxScanning: false,
+  vst3Editor: null,
   dialog: null,
   setView: (v) => {
     const ids = new Set(v.project.tracks.flatMap((t) => [...t.clips.map((c) => c.id), ...(t.titles ?? []).map((x) => x.id)]));

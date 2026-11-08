@@ -462,8 +462,8 @@ pre.cmd { margin: 0; padding: 10px 12px; background: var(--ink-0); border: 1px s
 .btn.solo-on { background: var(--marker); color: var(--marker-ink); border-color: var(--marker); }
 
 /* ------------------------------------------------------------ mixer */
-.mixer { display: flex; gap: 1px; background: var(--ink-4); overflow-x: auto; }
-.strip { width: 112px; flex: none; background: var(--ink-2); display: grid; grid-template-rows: auto auto minmax(60px, 1fr) auto auto auto; gap: 6px; padding: 8px 8px 10px; }
+.mixer { display: flex; gap: 1px; background: var(--ink-4); overflow: auto; }
+.strip { width: 112px; flex: none; background: var(--ink-2); display: grid; grid-template-rows: auto auto auto minmax(150px, 1fr) auto auto auto; gap: 6px; padding: 8px 8px 10px; }
 .strip .sname { font-weight: 700; font-size: 12px; color: var(--clip-a-edge); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .strip .eq { display: grid; grid-template-columns: 10px 1fr 26px; gap: 2px 4px; align-items: center; font: 600 9.5px var(--mono); color: var(--bone-3); }
 .kf-row .kf-nav { display: flex; gap: 2px; grid-column: 2 / 4; }
@@ -472,12 +472,30 @@ pre.cmd { margin: 0; padding: 10px 12px; background: var(--ink-0); border: 1px s
 .strip .eq .val { text-align: right; font-variant-numeric: tabular-nums; }
 .strip .eq .val.on { color: var(--bone); }
 .strip .eq input, .strip .pan input { width: 100%; accent-color: var(--bone-2); height: 12px; }
-.strip .fader { display: grid; grid-template-columns: 1fr 10px; gap: 6px; min-height: 0; }
-.strip .fader input[type=range] { writing-mode: vertical-lr; direction: rtl; width: 22px; height: 100%; min-height: 60px; accent-color: var(--bone); justify-self: center; }
+.strip .fader { display: grid; grid-template-columns: 36px 10px; gap: 6px; justify-content: center; align-items: center; }
+.strip .fader-well { position: relative; width: 36px; height: 150px; }
+.strip .fader-well input[type=range] { position: absolute; left: 50%; top: 50%; translate: -50% -50%; width: 150px; height: 22px; transform: rotate(-90deg); accent-color: var(--bone); }
+.strip .fader .meter { height: 150px; }
 .meter { position: relative; background: var(--ink-0); border-radius: 2px; overflow: hidden; }
 .meter > div { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, var(--ok) 0 70%, var(--warn) 70% 88%, var(--grease-soft) 88%); transition: height .05s linear; }
 .strip .readout { font: 11px var(--mono); color: var(--bone-2); text-align: center; }
 .strip .sm { display: flex; gap: 4px; justify-content: center; }
+.strip .fxbank { display: grid; grid-template-rows: repeat(5, 20px); gap: 3px; }
+.strip .fxslot { display: flex; gap: 3px; align-items: center; min-width: 0; position: relative; }
+.strip .fxslot .fx-empty { flex: 1; min-width: 0; height: 20px; border: 1px dashed var(--ink-5); border-radius: var(--r); background: none; color: var(--muted-deco); font-size: 10.5px; letter-spacing: .04em; }
+.strip .fxslot .fx-empty:hover { border-color: var(--bone-3); color: var(--bone-2); }
+.strip .fxslot .fx-name { flex: 1; min-width: 0; height: 20px; padding: 0 6px; border: 1px solid var(--ink-5); border-radius: var(--r); background: var(--ink-3); color: var(--bone-2); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center; }
+.strip .fxslot .fx-name:hover { border-color: var(--bone-3); color: var(--bone); }
+.strip .fxslot .fx-name.dim { color: var(--muted-deco); border-style: dashed; }
+.strip .fxslot .fx-x { opacity: 0; width: 16px; height: 16px; flex: none; border: 0; border-radius: 3px; background: rgba(224,58,46,.16); color: var(--grease-soft); font-size: 10px; line-height: 1; cursor: pointer; }
+.strip .fxslot:hover .fx-x { opacity: 1; }
+.strip .fxslot .fx-x:hover { background: rgba(224,58,46,.32); }
+.strip .fxslot .btn.small { height: 18px; font-size: 10px; padding: 0 5px; flex: none; }
+.plugin-list { display: grid; gap: 1px; max-height: 46vh; overflow: auto; }
+.plugin-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 10px; align-items: baseline; width: 100%; padding: 7px 9px; border: 0; border-radius: var(--r); background: none; text-align: left; color: var(--bone); }
+.plugin-row:hover, .plugin-row:focus-visible { background: var(--ink-3); outline: none; }
+.plugin-row-name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-row-path { font: 500 10.5px var(--mono); color: var(--bone-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ------------------------------------------------------------ scopes */
 .scopes { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--ink-4); }
