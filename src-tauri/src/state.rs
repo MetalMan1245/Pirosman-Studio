@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use pirosman_core::history::EditHistory;
 use pirosman_core::media::Tools;
-use pirosman_core::model::{Project, ProjectSettings};
+use pirosman_core::model::{Project, ProjectSettings, Track, TrackKind};
 use pirosman_core::ofx::{self, Catalog};
-use pirosman_core::render::{Prerendered, RenderSettings};
+use pirosman_core::render::{self, AudioPrerender, Prerendered, RenderSettings};
 use uuid::Uuid;
 use pirosman_core::project::history_dir;
 use pirosman_core::revisions::RevisionStore;
@@ -119,6 +119,62 @@ impl AppState {
         let cat = self.ofx_catalog(false);
         let jobs = ofx::plan_jobs(p, s, &cat, &self.cache_dir.join("ofx").join("renders"))?;
         ofx::prepare(tools, &jobs, cancel, progress)
+    }
+
+    /// Run the enabled VST3 plugin chains on each audio track, returning the
+    /// post-plugin WAVs the render plan should read instead of the raw clips.
+    pub fn vst3_prerender(&self, tools: &Tools, p: &Project, s: &RenderSettings, cancel: &std::sync::atomic::AtomicBool, mut progress: impl FnMut(i64, i64, String)) -> CoreResult<HashMap<Uuid, AudioPrerender>> {
+        let soloing = p.tracks.iter().any(|t| t.kind == TrackKind::Audio && t.solo && !t.muted);
+        let tracks: Vec<&Track> = p.tracks.iter()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .filter(|t| !t.muted && !(soloing && !t.solo))
+        .filter(|t| t.plugins.iter().any(|pl| pl.enabled))
+        .collect();
+        if tracks.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let dir = self.cache_dir.join("vst3").join("renders");
+        std::fs::create_dir_all(&dir)?;
+        let mut out = HashMap::new();
+        let total = tracks.len() as i64;
+        for (i, t) in tracks.iter().enumerate() {
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(CoreError::Media("render cancelled".into()));
+            }
+            progress(i as i64, total, format!("VST3: {} ({}/{})", t.name, i + 1, total));
+
+            let raw_in = dir.join(format!("track-{}.in.raw", t.id));
+            let raw_out = dir.join(format!("track-{}.out.raw", t.id));
+            let wav_out = dir.join(format!("track-{}.wav", t.id));
+
+            // 1. FFmpeg: render the track's pre-fader audio to raw f32le.
+            render::render_track_audio_raw(tools, p, s, t, &raw_in)?;
+
+            // 2. Rust: process through the enabled plugin chain in slot order.
+            let mut data = std::fs::read(&raw_in)
+            .map_err(|e| CoreError::Media(format!("read track audio: {e}")))?;
+            let plugins: Vec<&pirosman_core::model::TrackPlugin> =
+            t.plugins.iter().filter(|pl| pl.enabled).collect();
+            for pl in &plugins {
+                if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(CoreError::Media("render cancelled".into()));
+                }
+                let handle = crate::vst3::ensure_loaded(self, &pl.id, &pl.path, &pl.state)
+                .map_err(|e| CoreError::Invalid(format!("plugin {:?}: {e}", pl.label)))?;
+                crate::vst3::process_audio_blocks(&mut data, &handle, s.sample_rate)?;
+            }
+            std::fs::write(&raw_out, &data)
+            .map_err(|e| CoreError::Media(format!("write processed audio: {e}")))?;
+
+            // 3. FFmpeg: raw f32le → WAV for the main render.
+            render::encode_raw_to_wav(tools, &raw_out, &wav_out, s.sample_rate)?;
+
+            let _ = std::fs::remove_file(&raw_in);
+            let _ = std::fs::remove_file(&raw_out);
+
+            out.insert(t.id, AudioPrerender { path: wav_out.to_string_lossy().into() });
+        }
+        Ok(out)
     }
 
     pub fn tools(&self) -> CoreResult<Tools> {

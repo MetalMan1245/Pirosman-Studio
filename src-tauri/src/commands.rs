@@ -642,18 +642,22 @@ pub fn start_render(app: AppHandle, st: State<AppState>, settings: Option<Render
     std::thread::spawn(move || {
         let st = app.state::<AppState>();
         let started = std::time::Instant::now();
-        // OpenFX clips are rendered through their plugins first; the plan then reads those files.
-        let r = st
-            .ofx_prerender(&tools, &project, &settings, &cancel, |done, total, label| {
+        // OpenFX clips and VST3 track chains are rendered through their plugins
+        // first; the plan then reads those files.
+        let r = (|| -> pirosman_core::CoreResult<render::RenderResult> {
+            let ofx_pre = st.ofx_prerender(&tools, &project, &settings, &cancel, |done, total, label| {
                 let p = render::RenderProgress { out_time_us: 0, duration_us, fraction: done as f64 / total.max(1) as f64, speed: None, fps: None, stage: Some(label) };
                 let _ = app.emit("render-progress", serde_json::json!({ "job": job, "progress": p }));
+            })?;
+            let vst3_pre = st.vst3_prerender(&tools, &project, &settings, &cancel, |done, total, label| {
+                let p = render::RenderProgress { out_time_us: 0, duration_us, fraction: done as f64 / total.max(1) as f64, speed: None, fps: None, stage: Some(label) };
+                let _ = app.emit("render-progress", serde_json::json!({ "job": job, "progress": p }));
+            })?;
+            let plan2 = render::build_plan_with(&project, &settings, true, &ofx_pre, &vst3_pre)?;
+            render::execute(&tools, &plan2, overwrite, cancel.clone(), |p| {
+                let _ = app.emit("render-progress", serde_json::json!({ "job": job, "progress": p }));
             })
-            .and_then(|pre| render::build_plan_with(&project, &settings, true, &pre))
-            .and_then(|plan2| {
-                render::execute(&tools, &plan2, overwrite, cancel.clone(), |p| {
-                    let _ = app.emit("render-progress", serde_json::json!({ "job": job, "progress": p }));
-                })
-            });
+        })();
         *st.render_cancel.lock().unwrap() = None;
         match r {
             Ok(res) => {
@@ -1198,7 +1202,7 @@ pub async fn grab_still(app: AppHandle, frame: i64, path: String) -> Res<String>
         s.range_in = Some(frame.max(0));
         s.range_out = Some(frame.max(0) + 1);
         let pre = st.ofx_prerender(&tools, &p, &s, &AtomicBool::new(false), |_, _, _| {}).map_err(e)?;
-        let plan = render::build_plan_with(&p, &s, true, &pre).map_err(e)?;
+        let plan = render::build_plan_with(&p, &s, true, &pre, &std::collections::HashMap::new()).map_err(e)?;
         render::execute(&tools, &plan, true, Arc::new(AtomicBool::new(false)), |_| {}).map_err(e)?;
         Ok(out.to_string_lossy().into())
     })
@@ -1242,7 +1246,7 @@ pub async fn ofx_preview_frame(app: AppHandle, frame: i64) -> Res<Option<String>
         s.range_in = Some(frame.max(0));
         s.range_out = Some(frame.max(0) + 1);
         let pre = st.ofx_prerender(&tools, &p, &s, &AtomicBool::new(false), |_, _, _| {}).map_err(e)?;
-        let plan = render::build_plan_with(&p, &s, true, &pre).map_err(e)?;
+        let plan = render::build_plan_with(&p, &s, true, &pre, &std::collections::HashMap::new()).map_err(e)?;
         render::execute(&tools, &plan, true, Arc::new(AtomicBool::new(false)), |_| {}).map_err(e)?;
         // Handed over inline: a data URL needs no asset-protocol access to the cache.
         let bytes = std::fs::read(&out).map_err(|x| x.to_string())?;

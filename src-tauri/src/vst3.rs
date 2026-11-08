@@ -19,9 +19,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use pirosman_core::error::{CoreError, CoreResult};
 use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
+use vst3_host::audio::AudioBuffers;
+use vst3_host::plugin::ProcessMode;
 use vst3_host::Vst3Host;
 
 use crate::state::AppState;
@@ -223,5 +226,65 @@ pub fn vst3_unload(state: State<AppState>, slot: Uuid) -> Result<(), String> {
         }
     }
     state.vst3.lock().unwrap().remove(&slot);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- offline processing
+
+/// Ensure the plugin for `slot` is loaded (auto-loading from `path`/`state` if
+/// not already in the live map). Returns the shared handle.
+pub(crate) fn ensure_loaded(state: &AppState, slot: &Uuid, path: &str, state_b64: &str) -> Result<Arc<Mutex<vst3_host::Plugin>>, String> {
+    {
+        let live = state.vst3.lock().unwrap();
+        if let Some(h) = live.get(slot) {
+            return Ok(h.clone());
+        }
+    }
+    let mut plugin = host().lock().unwrap().load_plugin(path).map_err(|e| e.to_string())?;
+    if !state_b64.is_empty() {
+        let bytes = base64::engine::general_purpose::STANDARD
+        .decode(state_b64)
+        .map_err(|e| format!("corrupt plugin state: {e}"))?;
+        plugin.load_state(&bytes).map_err(|e| e.to_string())?;
+    }
+    let handle = Arc::new(Mutex::new(plugin));
+    state.vst3.lock().unwrap().insert(*slot, handle.clone());
+    Ok(handle)
+}
+
+/// Process interleaved stereo f32le audio through a single VST3 plugin in
+/// offline mode. `data` is modified in place.
+pub(crate) fn process_audio_blocks(data: &mut [u8], plugin: &Arc<Mutex<vst3_host::Plugin>>, sr: u32) -> CoreResult<()> {
+    const BLOCK: usize = 512;
+    let n_frames = data.len() / 8; // 2 channels × 4 bytes per frame
+    if n_frames == 0 {
+        return Ok(());
+    }
+
+    let mut lock = plugin.lock().unwrap();
+    lock.set_process_mode(ProcessMode::Offline)
+    .map_err(|e| CoreError::Media(format!("vst3 set_process_mode: {e}")))?;
+    lock.start_processing()
+    .map_err(|e| CoreError::Media(format!("vst3 start_processing: {e}")))?;
+
+    let sr_f = sr as f64;
+    for frame_start in (0..n_frames).step_by(BLOCK) {
+        let n = BLOCK.min(n_frames - frame_start);
+        let mut bufs = AudioBuffers::new(2, 2, n, sr_f);
+        // Deinterleave: data is L R L R …; inputs[ch][i] is planar.
+        for i in 0..n {
+            let base = (frame_start + i) * 8;
+            bufs.inputs[0][i] = f32::from_le_bytes([data[base], data[base + 1], data[base + 2], data[base + 3]]);
+            bufs.inputs[1][i] = f32::from_le_bytes([data[base + 4], data[base + 5], data[base + 6], data[base + 7]]);
+        }
+        lock.process_audio(&mut bufs)
+        .map_err(|e| CoreError::Media(format!("vst3 process_audio: {e}")))?;
+        // Interleave back.
+        for i in 0..n {
+            let base = (frame_start + i) * 8;
+            data[base..base + 4].copy_from_slice(&bufs.outputs[0][i].to_le_bytes());
+            data[base + 4..base + 8].copy_from_slice(&bufs.outputs[1][i].to_le_bytes());
+        }
+    }
     Ok(())
 }

@@ -292,14 +292,28 @@ pub struct Prerendered {
     pub pad_front: i64,
 }
 
+/// A track's post-plugin audio, pre-rendered for the final pass. The file spans
+/// the full timeline at the render's sample rate (stereo, f32le WAV); the plan
+/// reads it as a single input and applies the track's fader/pan/EQ on top.
+#[derive(Debug, Clone)]
+pub struct AudioPrerender {
+    pub path: String,
+}
+
 /// Translate the project into FFmpeg arguments. Pure: no processes run.
 /// `check_files` controls whether media/LUT/font existence is verified (tests pass false).
 pub fn build_plan(p: &Project, s: &RenderSettings, check_files: bool) -> CoreResult<RenderPlan> {
-    build_plan_with(p, s, check_files, &std::collections::HashMap::new())
+    build_plan_with(p, s, check_files, &std::collections::HashMap::new(), &std::collections::HashMap::new())
 }
 
-/// [`build_plan`] with OpenFX pre-renders substituted for their clips' media.
-pub fn build_plan_with(p: &Project, s: &RenderSettings, check_files: bool, pre: &std::collections::HashMap<uuid::Uuid, Prerendered>) -> CoreResult<RenderPlan> {
+/// [`build_plan`] with OpenFX pre-renders and VST3 audio pre-renders substituted.
+pub fn build_plan_with(
+    p: &Project,
+    s: &RenderSettings,
+    check_files: bool,
+    pre: &std::collections::HashMap<uuid::Uuid, Prerendered>,
+    audio_pre: &std::collections::HashMap<uuid::Uuid, AudioPrerender>,
+) -> CoreResult<RenderPlan> {
     p.validate()?;
     s.validate()?;
     let rate = p.settings.frame_rate;
@@ -539,6 +553,33 @@ pub fn build_plan_with(p: &Project, s: &RenderSettings, check_files: bool, pre: 
             if t.muted || (soloing && !t.solo) {
                 continue;
             }
+            // VST3 prerendered track: a single input replaces the per-clip chains.
+            if let Some(ap) = audio_pre.get(&t.id) {
+                args.extend(["-i".into(), ap.path.clone()]);
+                let b = buses.len();
+                let mut bus = vec![format!("aresample={sr}"), "aformat=sample_fmts=fltp:channel_layouts=stereo".into()];
+                if t.volume_db != 0.0 {
+                    bus.push(format!("volume={}dB", num(t.volume_db)));
+                }
+                if t.pan != 0.0 {
+                    let l = (1.0 - t.pan).min(1.0);
+                    let r = (1.0 + t.pan).min(1.0);
+                    bus.push(format!("pan=stereo|c0={}*c0|c1={}*c1", num(l), num(r)));
+                }
+                if t.eq_low_db != 0.0 {
+                    bus.push(format!("bass=g={}:f=100", num(t.eq_low_db)));
+                }
+                if t.eq_mid_db != 0.0 {
+                    bus.push(format!("equalizer=f=1000:t=o:w=1.5:g={}", num(t.eq_mid_db)));
+                }
+                if t.eq_high_db != 0.0 {
+                    bus.push(format!("treble=g={}:f=8000", num(t.eq_high_db)));
+                }
+                graph.push(format!("[{input_idx}:a:0]{}[bus{b}]", bus.join(",")));
+                buses.push(format!("[bus{b}]"));
+                input_idx += 1;
+                continue;
+            }
             let mut labels = vec![];
             for c in &t.clips {
                 let m = p.media(c.media_id).expect("validated");
@@ -552,11 +593,11 @@ pub fn build_plan_with(p: &Project, s: &RenderSettings, check_files: bool, pre: 
                 check_media(&m.name, &m.path)?;
                 args.extend([
                     "-ss".into(),
-                    ffmpeg_time(c.source_in - lead, rate),
-                    "-t".into(),
-                    ffmpeg_time(c.source_len() + lead + tail, rate),
-                    "-i".into(),
-                    m.path.clone(),
+                            ffmpeg_time(c.source_in - lead, rate),
+                            "-t".into(),
+                            ffmpeg_time(c.source_len() + lead + tail, rate),
+                            "-i".into(),
+                            m.path.clone(),
                 ]);
                 let n = smp(dur);
                 let mut f = vec!["asetpts=PTS-STARTPTS".to_string(), format!("aresample={sr}"), "aformat=sample_fmts=fltp:channel_layouts=stereo".into()];
@@ -1310,4 +1351,124 @@ mod tests {
         let missing: Vec<_> = used.iter().filter(|f| !required.contains(f.as_str())).collect();
         assert!(missing.is_empty(), "render plans use filters scripts/ffmpeg-requirements.txt does not list: {missing:?}");
     }
+}
+
+/// Render one track's pre-fader audio (all clips with per-clip gain/fade/speed,
+/// summed, padded to full timeline) as raw interleaved f32le. The track's
+/// volume/pan/EQ are NOT applied — those stay in the main filtergraph.
+/// Used as input to VST3 plugin processing.
+pub fn render_track_audio_raw(tools: &Tools, p: &Project, s: &RenderSettings, t: &Track, out: &Path) -> CoreResult<()> {
+    let rate = p.settings.frame_rate;
+    let sr = s.sample_rate;
+    let total_samples = frames_to_samples(p.duration(), rate, sr);
+    let smp = |f: i64| frames_to_samples(f, rate, sr);
+
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-nostdin".into(), "-v".into(), "error".into()];
+    let mut graph: Vec<String> = vec![];
+    let mut input_idx = 0usize;
+    let mut labels: Vec<String> = vec![];
+
+    for c in &t.clips {
+        let m = p.media(c.media_id).expect("validated");
+        let (lead, tail) = handles(t, c);
+        let (dip_in, dip_out) = dips(t, c);
+        let dur = c.duration() + lead + tail;
+        let at = c.start - lead;
+        args.extend([
+            "-ss".into(),
+                    ffmpeg_time(c.source_in - lead, rate),
+                    "-t".into(),
+                    ffmpeg_time(c.source_len() + lead + tail, rate),
+                    "-i".into(),
+                    m.path.clone(),
+        ]);
+        let n = smp(dur);
+        let mut f = vec!["asetpts=PTS-STARTPTS".to_string(), format!("aresample={sr}"), "aformat=sample_fmts=fltp:channel_layouts=stereo".into()];
+        if c.reversed {
+            f.push("areverse".into());
+        }
+        if c.speed != 1.0 {
+            f.extend(atempo_chain(c.speed));
+        }
+        f.push("apad".into());
+        f.push(format!("atrim=end_sample={n}"));
+        f.push(format!("volume={}dB", num(c.gain_db)));
+        if let Some(tr) = c.transition_in.filter(|t| t.kind.overlaps()) {
+            f.push(format!("afade=t=in:ss=0:ns={}", smp(tr.duration_frames)));
+        } else if dip_in > 0 {
+            f.push(format!("afade=t=in:ss=0:ns={}", smp(dip_in)));
+        } else if c.fade_in_frames > 0 {
+            f.push(format!("afade=t=in:ss=0:ns={}", smp(c.fade_in_frames)));
+        }
+        if tail > 0 {
+            let d = tail + lead_of_next(t, c);
+            f.push(format!("afade=t=out:ss={}:ns={}", n - smp(d), smp(d)));
+        } else if dip_out > 0 {
+            f.push(format!("afade=t=out:ss={}:ns={}", n - smp(dip_out), smp(dip_out)));
+        } else if c.fade_out_frames > 0 {
+            f.push(format!("afade=t=out:ss={}:ns={}", n - smp(c.fade_out_frames), smp(c.fade_out_frames)));
+        }
+        f.push(format!("adelay=delays={}S:all=1", smp(at)));
+        let label = format!("a{input_idx}");
+        graph.push(format!("[{input_idx}:a:0]{}[{label}]", f.join(",")));
+        labels.push(format!("[{label}]"));
+        input_idx += 1;
+    }
+
+    if labels.is_empty() {
+        graph.push(format!("anullsrc=r={sr}:cl=stereo,atrim=end_sample={total_samples}[bus0]"));
+    } else {
+        graph.push(format!("{}amix=inputs={}:duration=longest:normalize=0,apad=whole_len={total_samples}[bus0]", labels.join(""), labels.len()));
+    }
+
+    let filtergraph = graph.join(";");
+    args.extend(["-filter_complex".into(), filtergraph]);
+    args.extend(["-map".into(), "[bus0]".into()]);
+    args.extend(["-f".into(), "f32le".into(), "-c:a".into(), "pcm_f32le".into(), "-ar".into(), sr.to_string()]);
+    args.extend(["-y".into(), out.to_string_lossy().to_string()]);
+
+    let mut child = command(&tools.ffmpeg)
+    .args(&args)
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| CoreError::Media(format!("could not start ffmpeg: {e}")))?;
+    let mut stderr = child.stderr.take().expect("piped");
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let status = child.wait()?;
+    let stderr = err_thread.join().unwrap_or_default();
+    if !status.success() {
+        let tail: Vec<&str> = stderr.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+        return Err(CoreError::Media(format!("ffmpeg track-audio render failed ({status}): {}", tail.join(" | "))));
+    }
+    Ok(())
+}
+
+/// Decode a raw f32le file (interleaved stereo) into a WAV for the main render.
+pub fn encode_raw_to_wav(tools: &Tools, raw: &Path, wav: &Path, sr: u32) -> CoreResult<()> {
+    let mut child = command(&tools.ffmpeg)
+    .args([
+        "-f", "f32le", "-ar", &sr.to_string(), "-ac", "2",
+          "-i", &raw.to_string_lossy(),
+          "-c:a", "pcm_f32le", "-y", &wav.to_string_lossy(),
+    ])
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| CoreError::Media(format!("could not start ffmpeg: {e}")))?;
+    let mut stderr = child.stderr.take().expect("piped");
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let status = child.wait()?;
+    let stderr = err_thread.join().unwrap_or_default();
+    if !status.success() {
+        let tail: Vec<&str> = stderr.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        return Err(CoreError::Media(format!("ffmpeg raw→wav failed ({status}): {}", tail.join(" | "))));
+    }
+    Ok(())
 }
